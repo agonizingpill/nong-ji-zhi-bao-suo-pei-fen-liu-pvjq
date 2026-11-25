@@ -22,23 +22,24 @@ docker compose exec -T backend python -m scripts.seed_demo
 |---|---|---|---|
 |admin 质保主管|admin@gengchuan.local|Field2026!|台账编辑、受理、拆检、最终赔付/拒赔、旧件核验、结算核定和记账|
 |assessor 拆检评估员|assessor@gengchuan.local|Field2026!|新机登记、索赔、分流、拆检、旧件发件/收货、结算草稿；不可签署|
-|viewer 经销商观察员|viewer@gengchuan.local|Field2026!|只读九页及审计|
+|viewer 经销商观察员|viewer@gengchuan.local|Field2026!|只读十页及审计|
 
 ## 业务与页面
 
 1. 机具台账：序列号唯一，累计工时不可倒退。
 2. 索赔受理：关联真实机具，故障工时不得低于台账；超质保工时直接标记过保，不能赔付。
-3. 风险分流：Redis 队列交给 Python worker 计算，写回风险概率与模型证据；失败可重试。
-4. 拆检裁决：评估员补拆检意见；概率 ≥0.5 的高风险索赔必须证据完整才能赔付；主管裁决同时更新 Claim.status 和 Inspection.decision，结案不可再改。
+3. 风险分流：受理分流时把当前**在用模型版本**绑定到索赔，Redis 队列交给 Python worker 用绑定版本的固化构件打分，写回风险概率与依据；排队期间启用或回退版本不影响在途索赔，已结案旧索赔不重新改算；失败可重试，重试重新绑定当时在用版。
+4. 模型版本：候选模型先训练、主管审阅、再启用，取代逐单训练。训练按**机具隔离**划分训练/留出集（同一机具的历史索赔不会同时进入两侧），并随版本固化样本清单、编码器类别与评估依据；历史不足 40 条、机具不足 2 台或争议类别单一时说明原因并保留在用版。主管可启用或回退已审核版本；启用/回退必须基于页面当前在用版本提交，并发切换只接受基于当前版本的变更，构件校验失败时保留旧版。
+5. 拆检裁决：评估员补拆检意见；概率 ≥0.5 的高风险索赔必须证据完整才能赔付；主管裁决同时更新 Claim.status 和 Inspection.decision，结案不可再改。
 
 5. 旧件返厂：索赔完成分流并有拆检意见后登记物流；每份索赔仅一单，实收序列必须匹配发件快照；收货证据不得覆盖，主管核验后冻结。
 6. 赔付结算：仅已赔付且旧件核验通过的现场索赔可生成费用核定单；Python Decimal 按配件费＋工时×费率计算金额上限；主管核定不得超额，核定后冻结金额，使用唯一记账凭证一次入账。
 
-历史数据为固定 seed=42 生成的 180 条**模拟**已结案索赔，只用于演示。ColumnTransformer 对机型和故障部位 One-hot 编码，对故障工时、机龄、渗漏数值标准化，LogisticRegression 分类；分层留出 25%（45条），训练集 135 条，报告留出 accuracy/ROC AUC 及编码后系数。输入来自领域表而非任意 JSON。数据不足40条拒绝训练；不把模型输出作为自动赔付依据。随机种子42、训练/留出划分固定，模型的概率是模拟数据上的演示估计，未作真实业务校准。
+历史数据为固定 seed=42 生成的 180 条**模拟**已结案索赔，分布在 12 台机具上，只用于演示。ColumnTransformer 对机型和故障部位 One-hot 编码，对故障工时、机龄、渗漏数值标准化，LogisticRegression 分类。划分改用 StratifiedGroupKFold 按机具分组（n_splits=4，约 135 条训练 / 45 条留出）：同一机具的历史索赔只落在一侧，避免旧实现随机分层把同一机具混进训练与留出集而高估分流效果。每个版本固化训练/留出样本编号、涉及机具、编码器类别、系数与留出 accuracy/ROC AUC，模型构件 pickle 存入 artifacts 卷。输入来自领域表而非任意 JSON。数据不足 40 条、机具不足 2 台或类别单一拒绝训练并说明原因，在用版本不受影响；不把模型输出作为自动赔付依据。随机种子 42 固定，模型的概率是模拟数据上的演示估计，未作真实业务校准。
 
 ### 一天的工作剧本
 
-08:30 评估员查 GC-2408 水田机，台账 860h、质保2000h；09:00 受理 `CL-26017` 液压渗漏、机龄400天；09:30 分流 `CL-HIGH`（1900h/680天）；10:00 查看训练135/留出45条和风险概率；10:30 仅补文字但不勾证据，主管赔付被拒；11:00 核对工时计、油样和照片后补全证据；14:00 主管签署，索赔和拆检同步为 paid；16:00 查看审计，同时确认 `CL-EXPIRED` 的2450h过保不能赔付。真实验收会另建 `GC-E2E` 与 `CL-E2E` 检查新记录链路。
+08:30 评估员查 GC-2408 水田机，台账 860h、质保2000h；09:00 受理 `CL-26017` 液压渗漏、机龄400天；09:30 分流 `CL-HIGH`（1900h/680天），受理即绑定在用版本 MV-0001；10:00 在模型版本页查看按机具隔离的训练/留出划分与留出 AUC，再训练一个候选版本并由主管审阅、启用；10:30 仅补文字但不勾证据，主管赔付被拒；11:00 核对工时计、油样和照片后补全证据；14:00 主管签署，索赔和拆检同步为 paid；16:00 查看审计，同时确认 `CL-EXPIRED` 的2450h过保不能赔付。真实验收会另建 `GC-E2E` 与 `CL-E2E` 检查新记录链路。
 
 ## 技术和目录
 
@@ -51,13 +52,26 @@ docker compose exec -T backend python -m scripts.seed_demo
 |队列|Redis7 list；共享 artifacts 卷保存模型指标与心跳|
 |安全横切|JWT8小时、角色校验、PBKDF2口令、审计、请求追踪、全局错误恢复|
 
-`backend/src/models.py` 领域实体；`schemas.py` 请求约束；`claim_service.py` 状态与关联规则；`risk_model.py` 算法；`worker.py` 队列；`main.py` 路由；`middlewares.py` 请求追踪和错误恢复。`backend/scripts/seed_demo.py` 仅插入自然键缺失的演示记录，不覆盖修改。`frontend/src/pages/` 九业务页；`components/common.js` 共享导航、状态、标题和通知；`utils/api.js` API/会话/页面状态；`utils/format.js` 转义和格式化。
+`backend/src/models.py` 领域实体；`schemas.py` 请求约束；`claim_service.py` 状态与关联规则；`risk_model.py` 按机具隔离的训练/打分算法；`model_models.py` 模型版本与索赔绑定表；`model_service.py` 训练、审阅、启用/回退与版本绑定；`worker.py` 队列；`main.py` 路由；`middlewares.py` 请求追踪和错误恢复。`backend/scripts/seed_demo.py` 仅插入自然键缺失的演示记录，不覆盖修改，并在无在用版本时训练启用初始版本。`frontend/src/pages/` 十业务页；`components/common.js` 共享导航、状态、标题和通知；`utils/api.js` API/会话/页面状态；`utils/format.js` 转义和格式化。
 
 角色、索赔状态、故障部位枚举分别在 `backend/src/constants.py` 与 `frontend/src/constants.js` 定义；请求部位在 `backend/src/schemas.py` 的 Literal 中约束；角色校验在 `security.py`/`main.py`，状态转换在 `claim_service.py`/`worker.py`。共用状态徽标在索赔/风险/拆检三页复用。
 
 环境变量 `.env.example`：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、JWT_SECRET；数据库连接和 Redis 地址在 Compose 内设置。命名卷 db-data、redis-data、artifacts。当前宿主默认网络池耗尽，因此显式使用10.221.22.0/24子网；若换环境冲突可修改Compose networks。五服务都有真实健康检查，backend/worker 等待 MySQL/Redis healthy，前端等待后端。默认 seed 失败记日志不阻止进程。生产前应替换演示口令和 JWT secret。
 
 本地开发：Python `pip install -r backend/requirements.txt`，设置 DATABASE_URL/REDIS_URL 后在 backend 下 `uvicorn src.main:app --reload`；前端仍由 Compose Nginx 代理。测试与截图都在仓库外层 `test-artifacts/gb-1022/`，不会混入源码。
+
+## 模型版本治理（第四轮扩展）
+
+`model_models.py` 定义 ModelVersion（候选/已审核/在用）与 ClaimTriage（索赔→版本绑定）；`model_service.py` 负责训练候选、审阅、启用/回退和受理绑定；`risk_model.py` 改为按机具隔离的 StratifiedGroupKFold 划分与纯函数训练/打分；`worker.py` 只按绑定版本的固化构件打分，不再逐单训练。前端新增 `pages/models.js`「模型版本」页，可训练、审阅、启用和回退。
+
+|接口|权限/动作|
+|---|---|
+|GET /model-versions|三角色读取版本、指标、样本清单与编码器|
+|POST /model-versions/train|admin/assessor 训练候选；类别/机具/历史不足时 409 说明原因，在用版不变|
+|POST /model-versions/{id}/review|admin 审阅候选（需 ≥4 字意见）|
+|POST /model-versions/{id}/activate、/{id}/rollback|admin 启用或回退已审核版本；请求携带 expected_current_id，与当前在用版本不符即 409；构件校验失败保留旧版|
+
+启用/回退对 model_versions 表加行锁串行化，并发提交只接受基于当前版本的变更。索赔在 `/claims/{id}/assess` 受理分流时写入 ClaimTriage 绑定（无在用版本则 409），worker 按绑定版本打分，排队期间的切换不影响在途索赔；概率、版本、留出指标与绑定时间写入索赔 assessment_note 与 artifacts 存档，可追溯。已结案旧索赔的状态与概率不被重新改算。
 
 ## 新增履约模块
 

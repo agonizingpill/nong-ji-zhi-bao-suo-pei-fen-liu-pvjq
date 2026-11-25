@@ -7,9 +7,11 @@ from sqlalchemy.exc import IntegrityError
 from redis import Redis
 from .database import Base,engine,Session
 from .models import User,Machine,Claim,Inspection,Audit
+from .model_models import ModelVersion
 from .security import current,allow,password_hash,token_for
-from .schemas import Login,MachineIn,ClaimIn,InspectionIn,DecisionIn
+from .schemas import Login,MachineIn,ClaimIn,InspectionIn,DecisionIn,ReviewIn,SwitchIn
 from .claim_service import obj,get,audit,claim_view,submit,inspect,adjudicate
+from . import model_service as mv
 from .middlewares import RequestTrace,Recovery
 from .fulfilment_routes import router as fulfilment_router
 from .workshop_routes import router as workshop_router
@@ -70,10 +72,32 @@ def assess_claim(id:int,u=Depends(current)):
         if c.historical or c.status not in ['submitted','failed']:raise HTTPException(409,'当前索赔状态不可分流')
         if c.hours_at_failure>s.get(Machine,c.machine_id).warranty_hours:
             c.status='out_of_warranty';c.assessment_note='超出质保工时';audit(s,u,'warranty_rejected',c.code)
-        else:c.status='queued';audit(s,u,'risk_queued',c.code)
+        else:
+            v=mv.active_version(s)
+            if not v:raise HTTPException(409,'当前没有已启用的分流模型版本，请先在模型版本页训练、审阅并启用')
+            mv.bind(s,c,v);c.status='queued';audit(s,u,'risk_queued',f'{c.code} 绑定 {v.name}')
         result=claim_view(s,c)
     if result['status']=='queued':r.rpush('claim-risk',id)
     return result
+@app.get('/model-versions')
+def model_versions(u=Depends(current)):
+    with Session() as s:return [mv.view(v) for v in s.scalars(select(ModelVersion).order_by(ModelVersion.id.desc()))]
+@app.post('/model-versions/train')
+def train_version(u=Depends(current)):
+    allow(u,'admin','assessor')
+    with Session.begin() as s:return mv.view(mv.train_candidate(s,u))
+@app.post('/model-versions/{id}/review')
+def review_version(id:int,data:ReviewIn,u=Depends(current)):
+    allow(u,'admin')
+    with Session.begin() as s:return mv.view(mv.review(s,id,data.note,u))
+@app.post('/model-versions/{id}/activate')
+def activate_version(id:int,data:SwitchIn,u=Depends(current)):
+    allow(u,'admin')
+    with Session.begin() as s:return mv.view(mv.switch(s,id,data.expected_current_id,u,'activate'))
+@app.post('/model-versions/{id}/rollback')
+def rollback_version(id:int,data:SwitchIn,u=Depends(current)):
+    allow(u,'admin')
+    with Session.begin() as s:return mv.view(mv.switch(s,id,data.expected_current_id,u,'rollback'))
 @app.put('/claims/{id}/inspection')
 def save_inspection(id:int,data:InspectionIn,u=Depends(current)):
     allow(u,'admin','assessor')

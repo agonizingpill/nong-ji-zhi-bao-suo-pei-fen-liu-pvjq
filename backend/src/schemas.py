@@ -21,3 +21,7 @@ class InspectionIn(BaseModel):
     evidence_complete:bool
 class DecisionIn(BaseModel):
     decision:Literal['paid','denied']
+class ReviewIn(BaseModel):
+    note:str=Field(min_length=4,max_length=500)
+class SwitchIn(BaseModel):
+    expected_current_id:int|None=None

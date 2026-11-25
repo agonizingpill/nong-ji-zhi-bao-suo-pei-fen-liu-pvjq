@@ -2,6 +2,7 @@ from datetime import datetime,timezone
 from fastapi import HTTPException
 from sqlalchemy import select
 from .models import Machine,Claim,Inspection,Audit
+from .model_models import ClaimTriage
 
 def obj(x):return {c.name:getattr(x,c.name) for c in x.__table__.columns}
 def get(s,model,id):
@@ -12,6 +13,7 @@ def audit(s,u,action,detail):s.add(Audit(actor=u['email'],action=action,detail=s
 def claim_view(s,c):
     d=obj(c);d['machine_serial']=s.get(Machine,c.machine_id).serial
     i=s.scalar(select(Inspection).where(Inspection.claim_id==c.id));d['inspection']=obj(i) if i else None
+    b=s.scalar(select(ClaimTriage).where(ClaimTriage.claim_id==c.id));d['model_version']=b.version_name if b else None
     return d
 def submit(s,data,u):
     m=get(s,Machine,data.machine_id)

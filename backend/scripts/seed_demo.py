@@ -2,6 +2,8 @@ import random, json
 from sqlalchemy import select,func
 from src.database import Base,engine,Session
 from src.models import User,Machine,Claim,Inspection
+from src.model_models import ModelVersion
+from src.model_service import train_candidate
 from src.security import password_hash
 from src.return_models import PartReturn
 from src.settlement_models import Settlement
@@ -16,6 +18,8 @@ def seed():
             if not s.scalar(select(User).where(User.email==f'{role}@gengchuan.local')):s.add(User(email=f'{role}@gengchuan.local',password=password_hash('Field2026!'),role=role))
         for serial,model,hours in [('GC-2408','Paddy-90',860),('GC-2412','Dryland-120',1120),('GC-EXPIRED','Paddy-90',2450)]:
             if not s.scalar(select(Machine).where(Machine.serial==serial)):s.add(Machine(serial=serial,model=model,purchase_date='2025-04-12',warranty_hours=2000,hours=hours))
+        for serial,model,pd,hours in [('GC-H201','Paddy-90','2023-05-11',1830),('GC-H202','Dryland-120','2023-08-02',2210),('GC-H203','Paddy-90','2024-02-19',940),('GC-H204','Dryland-120','2023-11-25',2680),('GC-H205','Paddy-90','2024-06-08',1230),('GC-H206','Dryland-120','2024-09-14',760),('GC-H207','Paddy-90','2023-04-30',3050),('GC-H208','Dryland-120','2024-03-22',1490),('GC-H209','Paddy-90','2024-10-05',610)]:
+            if not s.scalar(select(Machine).where(Machine.serial==serial)):s.add(Machine(serial=serial,model=model,purchase_date=pd,warranty_hours=2000,hours=hours))
         s.flush(); machines=s.scalars(select(Machine).order_by(Machine.id)).all()
         rng=random.Random(42)
         for i in range(180):
@@ -23,7 +27,7 @@ def seed():
             if s.scalar(select(Claim).where(Claim.code==code)):continue
             hours=rng.randint(100,2900); age=rng.randint(30,1100); leak=rng.random()<.38; part=rng.choice(['hydraulic','engine','transmission'])
             score=hours/2000+age/1300+(.7 if leak else 0)+(.3 if part=='hydraulic' else 0)+rng.uniform(-.25,.25)
-            s.add(Claim(code=code,machine_id=machines[i%2].id,part=part,hours_at_failure=hours,age_days=age,leak_flag=leak,risk=None,status='denied' if score>1.7 else 'paid',historical=True,disputed=int(score>1.7),assessment_note='历史已结案 / 模拟训练数据'))
+            s.add(Claim(code=code,machine_id=machines[i%len(machines)].id,part=part,hours_at_failure=hours,age_days=age,leak_flag=leak,risk=None,status='denied' if score>1.7 else 'paid',historical=True,disputed=int(score>1.7),assessment_note='历史已结案 / 模拟训练数据'))
         for code,serial,hours,age,leak in [('CL-26017','GC-2408',860,400,True),('CL-HIGH','GC-2412',1900,680,True),('CL-EXPIRED','GC-EXPIRED',2450,600,False)]:
             if not s.scalar(select(Claim).where(Claim.code==code)):
                 m=s.scalar(select(Machine).where(Machine.serial==serial));s.add(Claim(code=code,machine_id=m.id,part='hydraulic',hours_at_failure=hours,age_days=age,leak_flag=leak,status='submitted',historical=False,assessment_note=''))
@@ -42,6 +46,10 @@ def seed():
             if not s.scalar(select(RepairBay).where(RepairBay.code==code)):s.add(RepairBay(code=code,daily_hours=cap,active=active))
         for code,part,qty in [('SP-HYD-01','hydraulic',20),('SP-ENG-01','engine',5),('SP-TRANS-01','transmission',3)]:
             if not s.scalar(select(SpareStock).where(SpareStock.code==code)):s.add(SpareStock(code=code,part=part,available_qty=qty))
+    with Session.begin() as s:
+        if not s.scalar(select(ModelVersion).where(ModelVersion.state=='active')):
+            v=train_candidate(s,{'email':'seed'})
+            v.state='active';v.reviewed_by='seed';v.reviewed_at=v.trained_at;v.review_note='演示初始版本：按机具隔离训练，直接启用';v.activated_by='seed';v.activated_at=v.trained_at
     with Session() as s:
         print(json.dumps({k:s.scalar(select(func.count()).select_from(v)) for k,v in [('users',User),('machines',Machine),('claims',Claim),('inspections',Inspection),('part_returns',PartReturn),('settlements',Settlement),('repair_bays',RepairBay),('repair_appointments',RepairAppointment),('spare_stocks',SpareStock),('part_issues',PartIssue),('repair_followups',RepairFollowup)]}))
 if __name__=='__main__':seed()
